@@ -2,7 +2,6 @@ package br.gov.ce.pge.nova_divida_utils.annotations.logs;
 
 import br.gov.ce.pge.nova_divida_utils.utils.StringTools;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.lang3.StringUtils;
 import org.aspectj.lang.ProceedingJoinPoint;
 import org.aspectj.lang.annotation.Around;
 import org.aspectj.lang.annotation.Aspect;
@@ -13,128 +12,170 @@ import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.Optional;
+import java.util.StringJoiner;
+import java.util.stream.IntStream;
 
 @Slf4j
 @Aspect
 @Component
 public class LogAutomaticoImpl {
 
-    @Around("@annotation(br.gov.ce.pge.nova_divida_utils.annotations.logs.LogAutomatico)")
+    private static final String ENTRADA = "ENTRADA";
+    private static final String SAIDA = "SAIDA";
+    private static final String ERRO = "ERRO";
+    private static final String SEPARATOR = " - ";
+
+    private record LogMetadata(String longMethodSignature, String description, LogAutomatico annotation) {
+        public static LogMetadata from(ProceedingJoinPoint joinPoint) {
+            MethodSignature signature = (MethodSignature) joinPoint.getSignature();
+            String longMethodSignature = signature.toLongString();
+
+            Method method = signature.getMethod();
+            LogAutomatico annotation = method.getAnnotation(LogAutomatico.class);
+            String description = StringTools.normalize(annotation.descricao());
+
+            return new LogMetadata(longMethodSignature, description, annotation);
+        }
+    }
+
+    private record LoggableArgument(String name, String type, Object value) {}
+
+    @Around("@annotation(LogAutomatico)")
     public Object logPadrao(ProceedingJoinPoint joinPoint) throws Throwable {
-        gerarLogEntrada(joinPoint);
-        Object retorno = joinPoint.proceed();
-        gerarLogSaida(joinPoint, retorno);
-        return retorno;
-    }
-
-    private void gerarLogEntrada(ProceedingJoinPoint joinPoint) {
+        LogMetadata metadata = LogMetadata.from(joinPoint);
         try {
-            Class<?> aClass = joinPoint.getThis().getClass();
-            String nomeClasse = aClass.getSimpleName();
-            var canonicalName = aClass.getCanonicalName();
-            var name = aClass.getName();
-            var descriptorString = aClass.descriptorString();
-            String methodName = joinPoint.getSignature().getName();
-            Optional<String> descricaoMethod = getDescricaoMethod(joinPoint);
-            Object[] argumentos = getArgumentos(joinPoint);
-            if (argumentos.length == 0)
-                gerarLog(nomeClasse, methodName, "ENTRADA", descricaoMethod);
-            else {
-                gerarLog(nomeClasse, methodName, "ENTRADA", descricaoMethod, argumentos);
-            }
-        } catch (Exception ex) {
-            log.error("ERRO NA GERACAO DO LOG DE ENTRADA", ex);
+            logEntrada(joinPoint, metadata);
+            Object result = joinPoint.proceed();
+            logSaida(metadata, result);
+            return result;
+        } catch (Throwable throwable) {
+            logErro(metadata, throwable);
+            throw throwable;
         }
     }
 
-    private void gerarLogSaida(ProceedingJoinPoint joinPoint, Object retorno) {
-        try {
-            if (this.gravarSaidaMetodo(joinPoint)){
-                String nomeClasse = joinPoint.getThis().getClass().getSimpleName();
-                String methodName = joinPoint.getSignature().getName();
-                Optional<String> descricaoMethod = this.getDescricaoMethod(joinPoint);
+    private void logErro(LogMetadata metadata, Throwable throwable) {
+        String errorClass = throwable.getClass().getSimpleName();
 
-                if (this.gravarRetorno(joinPoint)) {
-
-                    this.gerarLog(nomeClasse, methodName, "SAIDA", descricaoMethod, retorno);
-                } else {
-                    this.gerarLog(nomeClasse, methodName, "SAIDA", descricaoMethod);
-                }
-            }
-        } catch (Exception ex) {
-            log.error("ERRO NA GERACAO DO LOG DE SAIDA", ex);
+        StackTraceElement[] stackTrace = throwable.getStackTrace();
+        String origin = "(Origem indisponível)";
+        if (stackTrace != null && stackTrace.length > 0) {
+            origin = stackTrace[0].toString();
         }
+
+        String format = String.join(SEPARATOR,
+                "@LogAutomatico (" + ERRO + ")",
+                "Assinatura: {}",
+                "Causa: {}",
+                "Mensagem: '{}'",
+                "Origem: {}"
+        );
+        log.error(format,
+                metadata.longMethodSignature(),
+                errorClass,
+                throwable.getMessage(),
+                origin,
+                throwable);
     }
 
-    private boolean gravarRetorno(ProceedingJoinPoint joinPoint) {
-        LogAutomatico logAutomatico = getMethodFromJoinPoint(joinPoint).getDeclaredAnnotation(LogAutomatico.class);
-        if (logAutomatico != null)
-            return logAutomatico.gravarRetorno();
-        return false;
+    private void logEntrada(ProceedingJoinPoint joinPoint, LogMetadata metadata) {
+        LoggableArgument[] arguments = getArgumentos(joinPoint, metadata.annotation());
+        gerarLog(metadata, ENTRADA, arguments);
     }
 
-    private Optional<String> getDescricaoMethod(ProceedingJoinPoint joinPoint) {
-        Method method = getMethodFromJoinPoint(joinPoint);
-        LogAutomatico logAutomatico = method.getDeclaredAnnotation(LogAutomatico.class);
-        if (logAutomatico == null || StringUtils.isBlank(logAutomatico.descricao()))
-            return Optional.empty();
-        return Optional.of(StringTools.normalize(logAutomatico.descricao()));
-    }
-
-    private boolean gravarSaidaMetodo(ProceedingJoinPoint joinPoint) {
-        Method method = getMethodFromJoinPoint(joinPoint);
-        LogAutomatico logAutomatico = method.getDeclaredAnnotation(LogAutomatico.class);
-        return logAutomatico == null || logAutomatico.gravarSaida();
-    }
-
-    private Method getMethodFromJoinPoint(ProceedingJoinPoint joinPoint) {
-        var signature = (MethodSignature) joinPoint.getSignature();
-        return signature.getMethod();
-    }
-
-    private Object[] getArgumentos(ProceedingJoinPoint joinPoint) {
-        var parametros = new ArrayList<>();
-        Method method = getMethodFromJoinPoint(joinPoint);
-        LogAutomatico logAutomatico = method.getDeclaredAnnotation(LogAutomatico.class);
-        if (logAutomatico != null && logAutomatico.argumentos() != null) {
-            var argumentos = Arrays.asList(logAutomatico.argumentos());
-            for (int i = 0; i < method.getParameterCount(); i++) {
-                if(argumentos.contains(method.getParameters()[i].getName()))
-                    parametros.add(joinPoint.getArgs()[i]);
-            }
+    private void logSaida(LogMetadata metadata, Object result) {
+        LogAutomatico annotation = metadata.annotation();
+        if (!annotation.gravarSaida()) {
+            return;
         }
-        return parametros.toArray();
+        Object[] resultToLog = getResultToLog(annotation, result);
+        gerarLog(metadata, SAIDA, resultToLog);
     }
 
-
-    private void gerarLog(String nomeClasse, String methodName, String entrada, Optional<String> descricaoMethod, Object[] argumentos) {
-        StringBuilder stringBuilder = new StringBuilder();
-        stringBuilder.append("{} - {} - {}");
-        stringBuilder.append( " - {}".repeat(argumentos.length));
-        if (descricaoMethod.isPresent()) {
-            List<Object> text = new ArrayList<>(Arrays.asList(nomeClasse, methodName, entrada, descricaoMethod.get()));
-            text.addAll(Arrays.asList(argumentos));
-            log.info( stringBuilder.append( " - {}" ).toString(), text.toArray());
-        } else {
-            List<Object> text = new ArrayList<>(Arrays.asList(nomeClasse, methodName, entrada));
-            text.addAll(Arrays.asList(argumentos));
-            log.info(stringBuilder.toString(), text.toArray());
+    private Object[] getResultToLog(LogAutomatico annotation, Object result) {
+        if (annotation.gravarRetorno()) {
+            return new Object[]{result};
         }
+        return new Object[0];
     }
 
-    private void gerarLog(String nomeClasse, String methodName, String saida, Optional<String> descricaoMethod, Object retornoOptional) {
-        if (descricaoMethod.isPresent())
-            log.info("{} - {} - {} - {} - {}", nomeClasse, methodName, saida, descricaoMethod.get(), retornoOptional);
-        else
-            log.info("{} - {} - {} - {}", nomeClasse, methodName, saida, retornoOptional);
+    private LoggableArgument[] getArgumentos(ProceedingJoinPoint joinPoint, LogAutomatico annotation) {
+        String[] argumentsToLogNames = annotation.argumentos();
+        if (argumentsToLogNames.length == 0) {
+            return new LoggableArgument[0];
+        }
+
+        MethodSignature signature = (MethodSignature) joinPoint.getSignature();
+        String[] parameterNames = signature.getParameterNames();
+        Object[] methodArguments = joinPoint.getArgs();
+        List<String> argumentsToLog = Arrays.asList(argumentsToLogNames);
+
+        return IntStream.range(0, parameterNames.length)
+                .filter(index -> argumentsToLog.contains(parameterNames[index]))
+                .mapToObj(index -> {
+                    Object argValue = methodArguments[index];
+                    String argName = parameterNames[index];
+                    String argType = (argValue != null) ? argValue.getClass().getSimpleName() : "null";
+                    return new LoggableArgument(argName, argType, argValue);
+                })
+                .toArray(LoggableArgument[]::new);
     }
 
-    private void gerarLog(String nomeClasse, String methodName, String momento, Optional<String> descricaoMethod) {
-        if (descricaoMethod.isPresent())
-            log.info("{} - {} - {} - {}", nomeClasse, methodName, momento, descricaoMethod.get());
-        else
-            log.info( "{} - {} - {}", nomeClasse, methodName, momento);
+    private void gerarLog(LogMetadata metadata, String moment, Object[] details) {
+        List<Object> logArguments = new ArrayList<>();
+        logArguments.add(moment);
+        logArguments.add(metadata.longMethodSignature());
+        logArguments.add(metadata.description());
+
+        String baseFormat = String.join(SEPARATOR,
+                "@LogAutomatico ({})",
+                "Assinatura: {}",
+                "Descricao: {}"
+        );
+        StringBuilder logFormat = new StringBuilder(baseFormat);
+
+        appendDetailsToLog(logFormat, logArguments, details, moment);
+
+        log.info(logFormat.toString(), logArguments.toArray());
     }
 
+    private void appendDetailsToLog(StringBuilder logFormat, List<Object> logArguments, Object[] details, String moment) {
+        if (details == null || details.length == 0) {
+            return;
+        }
+        if (ENTRADA.equals(moment)) {
+            appendEntryDetails(logFormat, logArguments, details);
+            return;
+        }
+        appendExitDetails(logFormat, logArguments, details);
+    }
+
+    private void appendEntryDetails(StringBuilder logFormat, List<Object> logArguments, Object[] details) {
+        logFormat.append(SEPARATOR).append("Parametros: {}");
+        StringJoiner paramsString = new StringJoiner(", ");
+        for (int i = 0; i < details.length; i++) {
+            LoggableArgument detail = (LoggableArgument) details[i];
+            String formattedValue = formatObjectValue(detail.type(), detail.value());
+            paramsString.add((i + 1) + ". " + detail.name() + " = { " + formattedValue + " }");
+        }
+        logArguments.add(paramsString.toString());
+    }
+
+    private void appendExitDetails(StringBuilder logFormat, List<Object> logArguments, Object[] details) {
+        logFormat.append(SEPARATOR).append("Retorno: {}");
+        Object returnValue = details[0];
+        String className = (returnValue != null) ? returnValue.getClass().getSimpleName() : "void";
+        logArguments.add(formatObjectValue(className, returnValue));
+    }
+
+    private String formatObjectValue(String className, Object value) {
+        if (value == null) {
+            return className + "(null)";
+        }
+        String valueAsString = value.toString();
+        if (valueAsString.startsWith(className + "(")) {
+            return valueAsString;
+        }
+        return className + "(" + valueAsString + ")";
+    }
 }

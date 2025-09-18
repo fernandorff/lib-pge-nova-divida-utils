@@ -24,7 +24,16 @@
         <maven.compiler.source>${java.version}</maven.compiler.source>
         <maven.compiler.target>${java.version}</maven.compiler.target>
         <maven.compiler.release>${java.version}</maven.compiler.release>
+        <spring-framework.version>5.3.39</spring-framework.version>
     </properties>
+
+    <distributionManagement>
+        <repository>
+            <id>github</id>
+            <name>GitHub fernandorff Apache Maven Packages</name>
+            <url>https://maven.pkg.github.com/fernandorff/lib-pge-nova-divida-utils</url>
+        </repository>
+    </distributionManagement>
 
     <dependencies>
         <dependency>

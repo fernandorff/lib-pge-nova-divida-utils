@@ -14,7 +14,7 @@ public @interface LogAutomatico {
     /**
      * Descrição do método para ser apresentada no log.
      * */
-    String descricao() default "";
+    String descricao();
 
     /**
     * Lista de argumentos do método que serão apresentados no log.
