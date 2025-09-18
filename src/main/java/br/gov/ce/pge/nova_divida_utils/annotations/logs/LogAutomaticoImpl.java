@@ -12,7 +12,7 @@ import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.StringJoiner;
+import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 @Slf4j
@@ -23,18 +23,31 @@ public class LogAutomaticoImpl {
     private static final String ENTRADA = "ENTRADA";
     private static final String SAIDA = "SAIDA";
     private static final String ERRO = "ERRO";
-    private static final String SEPARATOR = " - ";
 
-    private record LogMetadata(String longMethodSignature, String description, LogAutomatico annotation) {
+    private record LogMetadata(
+            String returnType,
+            String declaringType,
+            String methodName,
+            String parameterTypes,
+            String description,
+            LogAutomatico annotation
+    ) {
         public static LogMetadata from(ProceedingJoinPoint joinPoint) {
             MethodSignature signature = (MethodSignature) joinPoint.getSignature();
-            String longMethodSignature = signature.toLongString();
+
+            String returnType = signature.getReturnType().getName();
+            String declaringType = signature.getDeclaringTypeName();
+            String methodName = signature.getName();
+
+            String parameterTypes = Arrays.stream(signature.getParameterTypes())
+                    .map(Class::getName)
+                    .collect(Collectors.joining(", "));
 
             Method method = signature.getMethod();
             LogAutomatico annotation = method.getAnnotation(LogAutomatico.class);
             String description = StringTools.normalize(annotation.descricao());
 
-            return new LogMetadata(longMethodSignature, description, annotation);
+            return new LogMetadata(returnType, declaringType, methodName, parameterTypes, description, annotation);
         }
     }
 
@@ -55,27 +68,22 @@ public class LogAutomaticoImpl {
     }
 
     private void logErro(LogMetadata metadata, Throwable throwable) {
-        String errorClass = throwable.getClass().getSimpleName();
+        StringBuilder format = new StringBuilder();
+        buildLogHeader(format, ERRO, metadata);
 
+        String errorClass = throwable.getClass().getSimpleName();
         StackTraceElement[] stackTrace = throwable.getStackTrace();
         String origin = "(Origem indisponível)";
         if (stackTrace != null && stackTrace.length > 0) {
             origin = stackTrace[0].toString();
         }
 
-        String format = String.join(SEPARATOR,
-                "@LogAutomatico (" + ERRO + ")",
-                "Assinatura: {}",
-                "Causa: {}",
-                "Mensagem: '{}'",
-                "Origem: {}"
-        );
-        log.error(format,
-                metadata.longMethodSignature(),
-                errorClass,
-                throwable.getMessage(),
-                origin,
-                throwable);
+        format.append("\n\t\t - Causa: ").append(errorClass);
+        format.append("\n\t\t - Mensagem: '").append(throwable.getMessage()).append("'");
+        format.append("\n\t\t - Origem: ").append(origin);
+        format.append("\n");
+
+        log.error(format.toString(), throwable);
     }
 
     private void logEntrada(ProceedingJoinPoint joinPoint, LogMetadata metadata) {
@@ -85,7 +93,7 @@ public class LogAutomaticoImpl {
 
     private void logSaida(LogMetadata metadata, Object result) {
         LogAutomatico annotation = metadata.annotation();
-        if (!annotation.gravarSaida()) {
+        if (!annotation.gravarSaidaMetodo()) { // Corrected method name
             return;
         }
         Object[] resultToLog = getResultToLog(annotation, result);
@@ -93,25 +101,26 @@ public class LogAutomaticoImpl {
     }
 
     private Object[] getResultToLog(LogAutomatico annotation, Object result) {
-        if (annotation.gravarRetorno()) {
+        if (annotation.gravarRetornoMetodo()) {
             return new Object[]{result};
         }
         return new Object[0];
     }
 
     private LoggableArgument[] getArgumentos(ProceedingJoinPoint joinPoint, LogAutomatico annotation) {
-        String[] argumentsToLogNames = annotation.argumentos();
-        if (argumentsToLogNames.length == 0) {
-            return new LoggableArgument[0];
-        }
-
         MethodSignature signature = (MethodSignature) joinPoint.getSignature();
         String[] parameterNames = signature.getParameterNames();
         Object[] methodArguments = joinPoint.getArgs();
-        List<String> argumentsToLog = Arrays.asList(argumentsToLogNames);
+
+        if (parameterNames.length == 0) {
+            return new LoggableArgument[0];
+        }
+
+        List<String> argumentsToLog = Arrays.asList(annotation.argumentosEntrada());
+        boolean logAll = argumentsToLog.isEmpty();
 
         return IntStream.range(0, parameterNames.length)
-                .filter(index -> argumentsToLog.contains(parameterNames[index]))
+                .filter(index -> logAll || argumentsToLog.contains(parameterNames[index]))
                 .mapToObj(index -> {
                     Object argValue = methodArguments[index];
                     String argName = parameterNames[index];
@@ -121,48 +130,55 @@ public class LogAutomaticoImpl {
                 .toArray(LoggableArgument[]::new);
     }
 
+    private void buildLogHeader(StringBuilder builder, String moment, LogMetadata metadata) {
+        builder.append("\n\t@LogAutomatico (").append(moment).append(")");
+        builder.append("\n\t\t - Descricao: ").append(metadata.description());
+        builder.append("\n\t\t - Assinatura:");
+        builder.append("\n\t\t\t - Retorno: ").append(metadata.returnType());
+        builder.append("\n\t\t\t - Classe: ").append(metadata.declaringType());
+        builder.append("\n\t\t\t - Metodo: ").append(metadata.methodName()).append("(").append(metadata.parameterTypes()).append(")");
+    }
+
     private void gerarLog(LogMetadata metadata, String moment, Object[] details) {
+        StringBuilder logFormat = new StringBuilder();
+        buildLogHeader(logFormat, moment, metadata);
+
         List<Object> logArguments = new ArrayList<>();
-        logArguments.add(moment);
-        logArguments.add(metadata.longMethodSignature());
-        logArguments.add(metadata.description());
-
-        String baseFormat = String.join(SEPARATOR,
-                "@LogAutomatico ({})",
-                "Assinatura: {}",
-                "Descricao: {}"
-        );
-        StringBuilder logFormat = new StringBuilder(baseFormat);
-
         appendDetailsToLog(logFormat, logArguments, details, moment);
 
+        logFormat.append("\n");
         log.info(logFormat.toString(), logArguments.toArray());
     }
 
     private void appendDetailsToLog(StringBuilder logFormat, List<Object> logArguments, Object[] details, String moment) {
-        if (details == null || details.length == 0) {
-            return;
-        }
         if (ENTRADA.equals(moment)) {
-            appendEntryDetails(logFormat, logArguments, details);
+            appendEntryDetails(logFormat, details);
             return;
         }
-        appendExitDetails(logFormat, logArguments, details);
+        if (details != null && details.length > 0) {
+            appendExitDetails(logFormat, logArguments, details);
+        }
     }
 
-    private void appendEntryDetails(StringBuilder logFormat, List<Object> logArguments, Object[] details) {
-        logFormat.append(SEPARATOR).append("Parametros: {}");
-        StringJoiner paramsString = new StringJoiner(", ");
+    private void appendEntryDetails(StringBuilder logFormat, Object[] details) {
+        logFormat.append("\n\t\t - Parametros:");
+        appendAllParameterDetails(logFormat, details);
+    }
+
+    private void appendAllParameterDetails(StringBuilder logFormat, Object[] details) {
+        if (details.length == 0) {
+            logFormat.append(" (vazio)");
+            return;
+        }
         for (int i = 0; i < details.length; i++) {
             LoggableArgument detail = (LoggableArgument) details[i];
             String formattedValue = formatObjectValue(detail.type(), detail.value());
-            paramsString.add((i + 1) + ". " + detail.name() + " = { " + formattedValue + " }");
+            logFormat.append("\n\t\t\t").append(i + 1).append(". ").append(detail.name()).append(" = ").append(formattedValue);
         }
-        logArguments.add(paramsString.toString());
     }
 
     private void appendExitDetails(StringBuilder logFormat, List<Object> logArguments, Object[] details) {
-        logFormat.append(SEPARATOR).append("Retorno: {}");
+        logFormat.append("\n\t\t - Retorno: {}");
         Object returnValue = details[0];
         String className = (returnValue != null) ? returnValue.getClass().getSimpleName() : "void";
         logArguments.add(formatObjectValue(className, returnValue));
@@ -170,7 +186,7 @@ public class LogAutomaticoImpl {
 
     private String formatObjectValue(String className, Object value) {
         if (value == null) {
-            return className + "(null)";
+            return "(null)";
         }
         String valueAsString = value.toString();
         if (valueAsString.startsWith(className + "(")) {
